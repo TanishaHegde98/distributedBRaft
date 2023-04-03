@@ -1,0 +1,4 @@
+/mount/distributeddBRaft/cmake/build/CMakeFiles/client.dir
+/mount/distributeddBRaft/cmake/build/CMakeFiles/server.dir
+/mount/distributeddBRaft/cmake/build/CMakeFiles/edit_cache.dir
+/mount/distributeddBRaft/cmake/build/CMakeFiles/rebuild_cache.dir
