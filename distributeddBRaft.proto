@@ -36,7 +36,48 @@ message WriteReq {
 message Response {
   int32 return_code = 1;
   int32 error_code = 2;
+  //TODO: change to string
   int64 current_leader = 3;
   int32 primary = 4;
   string value = 5;
+}
+
+//Raft Interface
+
+service RaftAPI{
+  rpc AppendEntriesRPC(AppendEntriesRequest) returns(AppendEntriesResponse);
+  rpc RequestVoteRPC(RequestVoteRequest) returns(RequestVoteResponse);
+}
+
+message AppendEntriesRequest{
+  int64 curr_term = 1;
+  int64 leader_id = 2 ;
+  int64 follower_log_idx = 3;
+  int64 follower_log_term = 4;
+  int64 leader_commit = 5;
+  repeated Entry entries = 6;
+}
+
+message AppendEntriesResponse{
+  int64 term = 1;
+  bool success = 2;
+}
+
+message RequestVoteRequest{
+  int64 term = 1;
+  int64 candidate_id = 2;
+  int64 last_log_idx = 3;
+  int64 last_log_term = 4;
+}
+
+message RequestVoteResponse {
+  int64 term = 1;
+  bool voted = 2;
+}
+
+message Entry {
+    int64 term = 1;
+    //TODO: rename it to string key
+    int64 address = 2;
+    string data = 3; //possible issue..
 }
