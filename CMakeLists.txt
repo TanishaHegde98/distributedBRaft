@@ -44,6 +44,9 @@ include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
 find_package(leveldb REQUIRED)
 
+# project(serverRaft)
+# add_executable(serverRaft )
+
 # Targets (client|server)
 foreach(_target
    client server)
@@ -54,14 +57,6 @@ foreach(_target
     ${_REFLECTION}
     ${_GRPC_GRPCPP}
     ${_PROTOBUF_LIBPROTOBUF}
-    leveldb::leveldb)
+    leveldb::leveldb
+    )
 endforeach()
-
-
-
-
-
-
-
-
-
