@@ -11,7 +11,7 @@ int Client::Get(const std::string& key) {
     if(status.ok()){
       std::cout << "Response data: " << reply.value() << endl;
     } else return reply.error_code();
-
+    return 0;
 }
 int Client::Put(const std::string& key, const std::string& val) {
     WriteReq request;
@@ -23,19 +23,22 @@ int Client::Put(const std::string& key, const std::string& val) {
     if(status.ok()){
       std::cout << "Response data: " << reply.value() << endl;
     } else return reply.error_code();
-
+    return 0;
 }
 
 
 int main(int argc, char* argv[]) {
-  string db_address = "0.0.0.0:50051";  // target address & port to send grpc requests to.
+  string db_address = "127.0.0.1:50052";  // target address & port to send grpc requests to.
   Client *c = new Client(grpc::CreateChannel(db_address, grpc::InsecureChannelCredentials()));
   c->Put("name", "val1");
   c->Get("name1");
   c->Put("name1", "val2");
   c->Get("name1");
-  c->Put("name", "val3");
-  c->Get("name");
+  // c->Put("name", "val3");
+  // c->Get("name");
+  // c->Put("nam4", "val4");
+  c->Get("name4");
+
   return 0;
 }
 

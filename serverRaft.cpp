@@ -28,6 +28,10 @@
 #include "globals.h"
 
 #define RAFT_LOG_PATH "mylog.log" 
+#define IP_SIZE 22
+#define NOTVOTED ""
+#define LOG_OFFSET (sizeof(int64_t)+IP_SIZE)
+#define ENTRY_SIZE sizeof(LogEntry)
 
 using namespace std;
 
@@ -46,8 +50,11 @@ using grpc::ServerContext;
 struct LogEntry{
     int64_t term;
     //TODO: rename it to string key ??
-    int64_t address;
-    string data;
+    //Problem logEntry should be constant for truncatr
+    char address[4096];
+    char data[4096];
+    // string address = "";
+    // string data = "";
 };
 
 enum server_state {
@@ -56,36 +63,36 @@ enum server_state {
     CANDIDATE
 };
 
-// extern std::vector<struct LogEntry> raft_log;
-// extern std::vector<int64_t> nextIndex;
-// extern std::vector<int64_t> matchIndex;
-// extern std::mutex log_lock;
-// lock for writing into db?
-
 class ServerRaft{
 
     private:
         //static const string RAFT_LOG_PATH ("mylog.log");
-        static const int TIMEOUT = 5000;
+        static const int64_t TIMEOUT = 5000;
         std::vector<std::unique_ptr<RaftAPI::Stub>> stubs;
     public: 
         static atomic<uint64_t> last_comm_time;
         static atomic<int64_t> curTerm;
-        static atomic<int64_t> voted_for;
         static atomic<int64_t> commit_index;
         static atomic<int64_t> last_applied;
-        static int64_t current_leader_id;
-        static int64_t server_id;
+        static string current_leader_id;
+        static string server_id;
+        static string raftLogPath;
         static int64_t num_servers;
         static vector<string> other_servers;
+        static char voted_for[IP_SIZE] ;
         enum server_state state;
 
-        //handle_heartbeats;
+        //raft helper functions
         void process_server_file(string filename);
         void read_raft_log();
         void handleHeartbeats();
         void sendHeartbeats();
         static uint64_t get_time();
+        static void set_serverId(string serverId);
+        static void set_raftLogPath();
+        void update_term_and_voted_for(int64_t newTerm, char votedFor[]);
+        void write_entry_to_log(LogEntry lE);
+        void commit_thread();
         
     static void AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t serverIdx, int64_t term);
 
@@ -96,19 +103,33 @@ class ServerRaft{
 //defining static variables
 atomic<uint64_t> ServerRaft:: last_comm_time(0) ;
 atomic<int64_t> ServerRaft:: curTerm(0);
-atomic<int64_t> ServerRaft:: voted_for(-1);
 atomic<int64_t> ServerRaft:: commit_index(-1);
 atomic<int64_t> ServerRaft::last_applied(-1);
-int64_t ServerRaft:: current_leader_id = 0;
-int64_t ServerRaft::server_id = -1;
+string ServerRaft:: current_leader_id{""};
+string ServerRaft::server_id("");
+string ServerRaft::raftLogPath("");
 int64_t ServerRaft::num_servers = 0;
 vector<string> ServerRaft::other_servers;
+char ServerRaft:: voted_for[IP_SIZE]={0};
 
 //defining it in this file
 std::vector<struct LogEntry> raft_log;
 std::vector<int64_t> nextIndex;
 std::vector<int64_t> matchIndex;
 std::mutex log_lock;
+std::mutex vote_lock;
+
+void ServerRaft::set_serverId(string serverId){
+  server_id = serverId;
+  set_raftLogPath();
+}
+
+void ServerRaft::set_raftLogPath(){
+  string mylog("mylog");
+  string ext(".log");
+  raftLogPath = mylog+server_id+ext;
+  // cout<<"log path: "<<raftLogPath<<endl;
+}
 
 void ServerRaft::process_server_file(string filename){
       std::ifstream file(filename);
@@ -125,42 +146,96 @@ void ServerRaft::process_server_file(string filename){
   }
 }
 
+
+void ServerRaft::commit_thread() {
+    int64_t last_log_index = 0;
+    int64_t majority = (num_servers / 2) + 1;
+    int64_t votes;
+
+    while (true) {
+        if (state != LEADER)
+            goto sleep;
+
+        last_log_index = raft_log.size() - 1;
+        for (int i = last_log_index; i > commit_index; i--) {
+            // Start with 1 vote counting ourselves
+            votes = 1;
+            for (int j = 0; j < matchIndex.size(); j++) {
+                if (matchIndex[j] >= i)
+                    votes++;
+            }
+
+            if (votes >= majority) {
+                // We can only commit if the log has an entry of out term
+                int64_t term;
+
+                log_lock.lock();
+                term = raft_log[i].term;
+                log_lock.unlock();
+
+                if (term == curTerm) {
+                    // apply_entries(commit_index + 1, i);
+                    commit_index = i;
+                }
+            }
+        }
+sleep:
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
 void ServerRaft:: read_raft_log(){
     int count = 0;
-    
-    ifstream rf(RAFT_LOG_PATH, ios::out | ios::binary);
+    // cout<<"int read log\n";
+    ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
     if (!rf) {
         ofstream wf;
-        wf.open(RAFT_LOG_PATH, ios::out | ios::binary);
-        if(!wf.is_open())
+        wf.open(raftLogPath.c_str(), ios::out | ios::binary);
+        if(!wf.is_open()){
+          cout<<"wf null";
+          return;
+        }
         //create_empty_raft_log();
-            return;
         int64_t term=0;
-        int64_t vote=-1;
+        char vote[IP_SIZE] = NOTVOTED;
         wf.write((char *) &term, sizeof(int64_t));
-        wf.write((char *) &vote, sizeof(int64_t));
+        wf.write((char *) vote, IP_SIZE);
         wf.close();
+
+        // //Read what is written:
+        // ifstream of(raftLogPath.c_str(), ios::out | ios::binary);
+        // if(!of.is_open())
+        //   return;
+        // int64_t term1;
+        // char vote1[IP_SIZE]={0};
+        // of.read((char *) &term1, sizeof(int64_t));
+        // of.read((char *) vote1, IP_SIZE);
+        // of.close();
+        // string vf(vote1);
+        // cout<<"Term in file: "<<term1<<"\nVote in file: "<<vf<<endl;
         return;
     }
 
-        rf.read((char *) &curTerm, sizeof(int64_t));
-        rf.read((char *) &voted_for, sizeof(int64_t));
+    rf.read((char *) &curTerm, sizeof(int64_t));
+    rf.read((char *) voted_for, sizeof(voted_for));
+    string vf(voted_for);
+    cout<<"on read Term in file: "<<curTerm<<"\nVote in file: "<<vf<<endl;
 
-        while (!rf.eof())
-        {  
-            LogEntry l; 
-            rf.read((char *) &l, sizeof(LogEntry));
-            raft_log.push_back(l);
-            count++;
-            if (!rf.eof()) 
-                break;
-        }
-        rf.close();
-        if(!rf.good()) {
-        cout << "Error occurred at reading time!" << endl;
-            return;
-        }
-        printf("Read %d entries from the persistent log!\n", count);
+    while (!rf.eof())
+    {  
+        LogEntry l; 
+        rf.read((char *) &l, sizeof(LogEntry));
+        cout << l.term << l.address << l.data << endl;
+        raft_log.push_back(l);
+        count++;
+        //TODO: reading last line twice
+
+        // if (!rf.eof()) 
+        //     break;
+    }
+    raft_log.pop_back();
+    rf.close();
+    cout<< "Read "<< raft_log.size() << " entries from the persistent log!\n";
 }
 
 void ServerRaft::handleHeartbeats(){
@@ -187,20 +262,22 @@ void ServerRaft::handleHeartbeats(){
             cout<<"before leader sleep\n";
             this_thread::sleep_for(std::chrono::milliseconds(1000));
         }else{
-            //sleep(TOTAL_TIMEOUT/1000);
-            uint64_t last_time = last_comm_time.load();
-            if ((get_time() > last_time) && ((get_time() - last_comm_time.load()) >= TOTAL_TIMEOUT)){
-            //if(true){
-                std::cout << "Trying to become the leader!\n";
-                break;
-                state = CANDIDATE;
-                //ret = startElection();
-            }
-            if (ret) {
-                cout << "Became the leader for term " << curTerm << ", id: " << server_id << "! Democracy works!\n";
-            } else {
-                //cout << "Did not become the leader\n";
-                last_comm_time = get_time();
+            // sleep(1000);
+            int64_t last_time = last_comm_time.load();
+            int64_t cur_time = get_time();
+            int64_t diff = (cur_time - last_time);
+
+            if (cur_time > last_time && cur_time - last_time >= TOTAL_TIMEOUT){
+              std::cout << "Trying to become the leader!\n";
+              state = CANDIDATE;
+              //ret = startElection();
+            
+              if (ret) {
+                  cout << "Became the leader for term " << curTerm << ", id: " << server_id << "! Democracy works!\n";
+              } else {
+                  cout << "Did not become the leader\n";
+                  last_comm_time = get_time();
+              }
             }
         }
     }
@@ -257,6 +334,7 @@ void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t 
 
         //log_lock.lock();
         // This represents the last index we are sending to the follower
+        log_lock.lock();
         update_index = raft_log.size() - 1;
 
         if (nextIndex[serverIdx] - 1 < 0) {
@@ -270,11 +348,12 @@ void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t 
         for (int i = nextIndex[serverIdx]; i < raft_log.size(); i++) {
           entry = request.add_entries();
           entry->set_term(raft_log[i].term);
+          // string add(raft_log[i].address);
           entry->set_address(raft_log[i].address);
+          // string d(raft_log[i].data);
           entry->set_data(raft_log[i].data); // should send the string hopefully
         }
-
-       // log_lock.unlock();
+        log_lock.unlock();
 
         stub->AppendEntriesRPC(context.get(), request, &response);
         success = response.success();
@@ -306,11 +385,73 @@ uint64_t ServerRaft::get_time(){
   ).count();
 }
 
+void ServerRaft::update_term_and_voted_for(int64_t newTerm, char votedFor[]){
+  ofstream wf (raftLogPath.c_str(), ios::out | ios::binary);
+  if(!wf.is_open())
+    return;
+  wf.seekp(0,ios::beg);
+  wf.write((char *) &newTerm, sizeof(int64_t));
+  wf.write((char *) votedFor, IP_SIZE);
+  wf.close();
 
+  //Read the updated file
+  ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
+  if(!rf.is_open())
+    return;
+  int64_t term;
+  char vote[IP_SIZE];
+  rf.read((char *) &term, sizeof(int64_t));
+  rf.read((char *) vote, IP_SIZE);
+  rf.close();
+  string vf(vote);
+  cout<<"Update: Term in file: "<<term<<"\nVote in file: "<<vf<<endl;
+}
+
+void ServerRaft::write_entry_to_log(LogEntry lE){
+  ofstream wf (raftLogPath, ios_base::app | ios::binary);
+  if(wf.is_open()) {
+      wf.write((char *) &lE.term, sizeof(int64_t));
+      wf.write((char *) lE.address, 4096);
+      wf.write((char *) lE.data, 4096);
+      wf.close();
+  } else {
+    return;
+  }
+
+
+  ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
+  if(!rf.is_open())
+    return;
+  rf.seekg(0,ios::beg);
+  int64_t curTerm;
+  char voted_for[22];
+  rf.read((char *) &curTerm, sizeof(int64_t));
+  rf.read((char *) voted_for, sizeof(voted_for));
+    string vf(voted_for);
+    cout<<"on read Term in file: "<<curTerm<<"\nVote in file: "<<vf<<endl;
+    cout<<"Log Entry\n";
+    while (!rf.eof())
+    {  
+        LogEntry l; 
+        rf.read((char *) &l, sizeof(LogEntry));
+        cout<<"Term: "<<l.term<<" Address: "<<l.address<<" Value: "<<l.data<<endl;
+        if (!rf.eof()) 
+            break;
+    }
+    rf.close();
+
+
+  //Any error check required?? 
+
+}
 
 //----------------------------------RaftInterfaceImp----------------------------------
 
 class RaftInterfaceImpl final : public RaftAPI::Service {
+
+  public: 
+    //only one obj per registration?
+    ServerRaft respRaft;
 //   Status RequestVoteRPC(ServerContext *context, const RequestVoteRequest *request,
 //                 RequestVoteResponse *reply) override {
 //     int64_t requestTerm = request->term();
@@ -367,7 +508,7 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
                 AppendEntriesResponse *reply) override {
 
       int64_t requestTerm = request->curr_term();
-      int64_t leaderId = request->leader_id();
+      string leaderId = request->leader_id();
       int64_t prevLogIndex = request->follower_log_idx();
       int64_t prevLogTerm = request->follower_log_term();
 
@@ -376,16 +517,15 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
       std::cout << "Recieved Append Entries from " <<  leaderId << " for term " << requestTerm <<
         ", prevLogIndex: " << prevLogIndex << " and prevLogTerm: " << prevLogTerm << std::endl;
 
-      respRaft.last_comm_time = respRaft.get_time();
+      ServerRaft::last_comm_time = respRaft.get_time();
 
       if (requestTerm > respRaft.curTerm) {
-        // vote_lock.lock();
-        // update_term_and_voted_for(requestTerm, HAVENT_VOTED);
+        vote_lock.lock();
+        char notvoted[22]=NOTVOTED;
+        respRaft.update_term_and_voted_for(requestTerm, notvoted);
         respRaft.state = FOLLOWER;
         respRaft.current_leader_id = leaderId;
-        // vote_lock.unlock();
-        //reply->set_success(false);
-        //reply->set_term(curTerm);
+        vote_lock.unlock();
         cout << "\n1";
       }
   // check on valid term
@@ -395,65 +535,66 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
         cout<<"req term "<<requestTerm<<" less than cur term "<<respRaft.curTerm<< "\n";
         return Status::OK;
       } else {
-        
-        // vote_lock.lock();
-        // curTerm = requestTerm;
-        // voted_for = HAVENT_VOTED;
-        // state = FOLLOWER;
-        // current_leader_id = leaderId;
-        // vote_lock.unlock();
 
+        // Same term now update logs... 
         respRaft.state = FOLLOWER;
-         cout << "\n2";
+        cout << "\n2---";
         reply->set_term(respRaft.curTerm);
         reply->set_success(true);
       }
 
-      // log_lock.lock();
+       log_lock.lock();
       // if prevlogindex is more than our last index, or term on prev log index is not same
       if(prevLogIndex >= (int64_t)raft_log.size() || (prevLogIndex >= 0 && raft_log[prevLogIndex].term != prevLogTerm)) {
         reply->set_success(false);
         cout<<"set false for if condition\n";
-	      // log_lock.unlock();
+	      log_lock.unlock();
         return Status::OK;
       }
 
       // deleting entries after index with same term
 
-      //TODO: binary write logic
-      // if(prevLogIndex+1 < raft_log.size()) {
-      //   truncate(RAFT_LOG_FILE, LOG_INTRO_SIZE + ((prevLogIndex + 1) * ENTRY_SIZE));
-      //   raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
-      // }
+      //TODO: binary write logic --> should be same trunctate
+      if(prevLogIndex+1 < raft_log.size()) {
+        cout << "\n inside truncate"; 
+        truncate(respRaft.raftLogPath.c_str(), LOG_OFFSET + ((prevLogIndex + 1) * ENTRY_SIZE));
+        raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
+      }
 
-      // if(request->entries().size() > 0) {
-      //   int64_t entryTerm = request->entries(0).term();
-      //   if (raft_log[prevLogIndex+1].term != entryTerm) {
-      //     raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
-      //   }
-      // }
+      if(request->entries().size() > 0) {
+        int64_t entryTerm = request->entries(0).term();
+        if (raft_log[prevLogIndex+1].term != entryTerm) {
+          raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
+        }
+      }
 
-      // struct LogEntry newEntry;
-      // //run a loop, keep on appending entries from WriteRequest
-      // for (int i = 0; i < request->entries().size(); i++) { //confirm syntax???
-      //   newEntry.term = request->entries(i).term();
-      //   newEntry.address = request->entries(i).address();
-      //   memcpy(newEntry.data, request->entries(i).data().c_str(), BLOCK_SIZE);
-      //   persist_entry_to_log(newEntry);
-      //   raft_log.push_back(newEntry);
-      //   //commit_index = raft_log.size() - 1;
-      // }
-      // log_lock.unlock();
+      struct LogEntry newEntry;
+      //run a loop, keep on appending entries from WriteRequest
+      for (int i = 0; i < request->entries().size(); i++) { 
+        cout << "\n inside for---" ;
+        newEntry.term = request->entries(i).term(); 
 
-      // int64_t leaderCommitIdx = request->leader_commit();
-      // if (leaderCommitIdx > commit_index) { //comparison should be with commit index
-      //   int64_t new_commit_index = std::min(leaderCommitIdx, (int64_t)(raft_log.size()-1));
+        cout << "\n-----" << request->entries(i).address().c_str();
+        cout << "\n-----" << request->entries(i).data();
 
-      //   // Apply the log entries
-      //   apply_entries(commit_index + 1, new_commit_index);
+        memcpy(newEntry.address, request->entries(i).address().c_str(), 4096);
+        memcpy(newEntry.data, request->entries(i).data().c_str(), 4096);
+        respRaft.write_entry_to_log(newEntry);
+        raft_log.push_back(newEntry);
+      }
+      log_lock.unlock();
 
-      //   commit_index = new_commit_index;
-      // }
+      int64_t leaderCommitIdx = request->leader_commit();
+      cout << "\n leaderCommitIdx ---- " << leaderCommitIdx;
+      cout << "\n followerCommitIdx ---- " << ServerRaft::commit_index;
+      if (leaderCommitIdx >  ServerRaft::commit_index) { //comparison should be with commit index
+        int64_t new_commit_index = std::min(leaderCommitIdx, (int64_t)(raft_log.size()-1));
+        cout << "\nhere---";
+        // Apply the log entries to LevelDB --> madhu help
+        // apply_entries(raspRaft.commit_index + 1, new_commit_index);
+
+        ServerRaft::commit_index = new_commit_index;
+      }
 
 
     reply->set_success(true);
