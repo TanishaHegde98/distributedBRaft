@@ -37,7 +37,7 @@ message Response {
   int32 return_code = 1;
   int32 error_code = 2;
   //TODO: change to string
-  int64 current_leader = 3;
+  bytes current_leader = 3;
   int32 primary = 4;
   string value = 5;
 }
@@ -51,7 +51,7 @@ service RaftAPI{
 
 message AppendEntriesRequest{
   int64 curr_term = 1;
-  int64 leader_id = 2 ;
+  bytes leader_id = 2 ;
   int64 follower_log_idx = 3;
   int64 follower_log_term = 4;
   int64 leader_commit = 5;
@@ -65,7 +65,7 @@ message AppendEntriesResponse{
 
 message RequestVoteRequest{
   int64 term = 1;
-  int64 candidate_id = 2;
+  bytes candidate_id = 2;
   int64 last_log_idx = 3;
   int64 last_log_term = 4;
 }
@@ -78,6 +78,6 @@ message RequestVoteResponse {
 message Entry {
     int64 term = 1;
     //TODO: rename it to string key
-    int64 address = 2;
-    string data = 3; //possible issue..
+    bytes address = 2;
+    bytes data = 3; //possible issue..
 }

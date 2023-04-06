@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <cstring>
 //Should comment
 #include <grpc++/grpc++.h>
 
@@ -34,6 +35,8 @@ using grpc::ServerReader;
 using grpc::Status;
 
 //Global object for serverRaft
+
+#define NOTVOTED ""
 
 ServerRaft raft;
 
@@ -81,6 +84,10 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
         }
 
         Status Put(ServerContext* context, const WriteReq* request,Response* writer) override {
+            
+            int entry_index;
+            string address(request->key());
+
             cout << "In Put Client" << endl;
             leveldb::DB *db;
             leveldb::Options options;
@@ -90,7 +97,8 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             std::string val;
 
             leveldb::Status dbStatus = leveldb::DB::Open(options, "/tmp/testdb", &db);
-                        cout<< "\ndb:" << &db;
+            assert(dbStatus.ok());
+            // cout<< "\ndb:" << &db;
             if (!dbStatus.ok()) {
                 std::cout << "DB Read Error" << endl;
                 writer->set_error_code(-2);
@@ -104,10 +112,39 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
                 std::cout << "Write Error" << endl;
                 writer->set_error_code(-errno);
             } else {
-            writer->set_error_code(0);
-            writer->set_value(value);
+                writer->set_error_code(0);
+                writer->set_value(value);
             }
             delete db;
+
+            LogEntry log_entry;
+            log_entry.term = raft.curTerm;
+            memcpy(log_entry.address, request->key().c_str(), 4096);
+            memcpy(log_entry.data, request->value().c_str(), 4096);
+
+            // Add the new entry to the log
+            log_lock.lock();
+            raft.write_entry_to_log(log_entry);
+            raft_log.push_back(log_entry);
+            entry_index = raft_log.size() - 1;
+            log_lock.unlock();
+
+            // Wait for the update to be commited before returning to the client
+            while (ServerRaft::commit_index < entry_index) {
+                // Have we somehow been demoted from leader?
+                // If so, forward the client to the new leader
+                cout << "\n----- inside while-----";
+                // TODO: remove this from here after adding ldr_commit()
+                ServerRaft::commit_index = entry_index + 1;
+                if (raft.state != LEADER) {
+                    writer->set_return_code(-1);
+                    writer->set_current_leader(raft.current_leader_id);
+                    return Status::OK;
+                }
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            cout << "\n---out of put ----\n";
             return Status::OK;
         }
 };
@@ -162,7 +199,15 @@ int main(int argc, char** argv) {
     string filename = argv[3];
 
     raft.process_server_file(filename);
-    
+
+    //will create raftLogPath too
+    raft.set_serverId(full_server_path);
+
+    raft.read_raft_log();
+    // char notvoted[IP_SIZE] = "127.0.0.1:50051";
+    // cout<<"server size: "<<sizeof(notvoted);
+    // raft.update_term_and_voted_for(2,notvoted);
+
     raft.last_comm_time = raft.get_time() + 20000;
     for(auto o:ServerRaft::other_servers){
         cout<<o<<endl;
