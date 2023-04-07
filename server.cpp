@@ -44,6 +44,12 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
     public:
         Status Get(ServerContext* context, const ReadReq* request, Response* writer)  {
             cout << "In Get Client" << endl;
+            cout << "RAFT STATE IN CLIENT:" << raft.state << endl;
+            if(raft.state == FOLLOWER){
+                writer->set_return_code(NOT_PRIMARY);
+                writer->set_error_code(0);
+                return Status::OK;
+            }
             leveldb::DB *db;
             leveldb::Options options;
             options.create_if_missing = true;
@@ -55,16 +61,15 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
         
             if (!dbStatus.ok()) {
                 std::cout << "DB Read Error" << endl;
-                writer->set_error_code(-2);
+                writer->set_return_code(DB_FAIL);
+                writer->set_error_code(-1);
             }
             leveldb::Iterator* it = db->NewIterator(leveldb::ReadOptions());
             for (it->SeekToFirst(); it->Valid(); it->Next())
             {
                 if(it->key().ToString() == request->key()){
                     key_found = 1;
-                    val = it->value().ToString();
-                    
-                    
+                    val = it->value().ToString();    
                 }
             }
             if(key_found){
@@ -80,15 +85,20 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             delete db;
             writer->set_value(val);
             writer->set_error_code(0);
+            writer->set_return_code(DB_SUCCESS);
             return Status::OK;
         }
 
         Status Put(ServerContext* context, const WriteReq* request,Response* writer) override {
             
             int entry_index;
-            string address(request->key());
 
             cout << "In Put Client" << endl;
+            if(raft.state == FOLLOWER){
+                writer->set_return_code(NOT_PRIMARY);
+                writer->set_error_code(0);
+                return Status::OK;
+            }
             leveldb::DB *db;
             leveldb::Options options;
             options.create_if_missing = true;
@@ -101,7 +111,8 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             // cout<< "\ndb:" << &db;
             if (!dbStatus.ok()) {
                 std::cout << "DB Read Error" << endl;
-                writer->set_error_code(-2);
+                writer->set_return_code(DB_FAIL);
+                writer->set_error_code(-1);
             }
             std::string value = request->value();
             std::cout << "Request key: " << request->key() << endl;
@@ -110,10 +121,12 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             dbStatus = db->Put(leveldb::WriteOptions(), request->key(), value);
             if (!dbStatus.ok()) {
                 std::cout << "Write Error" << endl;
-                writer->set_error_code(-errno);
+                writer->set_return_code(DB_FAIL);
+                writer->set_error_code(-1);
             } else {
                 writer->set_error_code(0);
                 writer->set_value(value);
+                writer->set_return_code(DB_SUCCESS);
             }
             delete db;
 
@@ -135,16 +148,18 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
                 // If so, forward the client to the new leader
                 cout << "\n----- inside while-----";
                 // TODO: remove this from here after adding ldr_commit()
-                ServerRaft::commit_index = entry_index + 1;
+                //ServerRaft::commit_index += 1;
                 if (raft.state != LEADER) {
                     writer->set_return_code(-1);
                     writer->set_current_leader(raft.current_leader_id);
                     return Status::OK;
                 }
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                ServerRaft::commit_index += 1;
+                //sleeping because commit_thread should commit the log.. not req in our case
+                //std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
             cout << "\n---out of put ----\n";
+            
             return Status::OK;
         }
 };
