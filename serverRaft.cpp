@@ -35,12 +35,13 @@
 
 using namespace std;
 
+using distributeddBRaft::RaftAPI;
 using distributeddBRaft::AppendEntriesRequest;
 using distributeddBRaft::AppendEntriesResponse;
 using distributeddBRaft::RequestVoteRequest;
 using distributeddBRaft::RequestVoteResponse;
 using distributeddBRaft::Entry;
-using distributeddBRaft::RaftAPI;
+
 using grpc::Server;
 using grpc::ClientContext;
 using grpc::Status;
@@ -50,7 +51,7 @@ using grpc::ServerContext;
 struct LogEntry{
     int64_t term;
     //TODO: rename it to string key ??
-    //Problem logEntry should be constant for truncate
+    //Problem logEntry should be constant for truncatr
     char address[4096];
     char data[4096];
     // string address = "";
@@ -93,12 +94,17 @@ class ServerRaft{
         void update_term_and_voted_for(int64_t newTerm, char votedFor[]);
         void write_entry_to_log(LogEntry lE);
         void commit_thread();
+        int startElection();
         
-    static void AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t serverIdx, int64_t term);
-
-    //all raft function helpers
-    // 
+    static void AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub,
+        int64_t serverIdx, int64_t term, ServerRaft *raftObj);
+    static void RequestVoteRPC(std::unique_ptr<RaftAPI::Stub> &stub,
+        std::shared_ptr<std::atomic<uint8_t>> yes_votes,
+        std::shared_ptr<std::atomic<uint8_t>> no_votes,
+        int64_t term, string callingServerId);
 };
+
+ServerRaft respRaft;
 
 //defining static variables
 atomic<uint64_t> ServerRaft:: last_comm_time(0) ;
@@ -202,6 +208,17 @@ void ServerRaft:: read_raft_log(){
         wf.write((char *) vote, IP_SIZE);
         wf.close();
 
+        // //Read what is written:
+        // ifstream of(raftLogPath.c_str(), ios::out | ios::binary);
+        // if(!of.is_open())
+        //   return;
+        // int64_t term1;
+        // char vote1[IP_SIZE]={0};
+        // of.read((char *) &term1, sizeof(int64_t));
+        // of.read((char *) vote1, IP_SIZE);
+        // of.close();
+        // string vf(vote1);
+        // cout<<"Term in file: "<<term1<<"\nVote in file: "<<vf<<endl;
         return;
     }
 
@@ -232,7 +249,7 @@ void ServerRaft::handleHeartbeats(){
   std::random_device dev;
   std::mt19937 rng(dev());
   std::uniform_int_distribution<std::mt19937::result_type> dist(0, 100);
-  const int TOTAL_TIMEOUT = TIMEOUT + dist(rng);
+  const int TOTAL_TIMEOUT = TIMEOUT + rand() % 1000;
 
 //create new stubs
     for (auto it = other_servers.begin(); it != other_servers.end(); it++) {
@@ -247,8 +264,6 @@ void ServerRaft::handleHeartbeats(){
     while(true){
         bool ret = false;
         if(state == LEADER){
-            //update commit index to raftlog as I have been initialized leader at start.
-            ServerRaft::commit_index = raft_log.size()-1;
             sendHeartbeats();
             cout<<"before leader sleep\n";
             this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -259,12 +274,15 @@ void ServerRaft::handleHeartbeats(){
             int64_t diff = (cur_time - last_time);
 
             if (cur_time > last_time && cur_time - last_time >= TOTAL_TIMEOUT){
+              cout << "\n---current time ----" <<  cur_time;
+              cout << "\n---TOTAL_TIMEOUT ----" <<  TOTAL_TIMEOUT;
+
               std::cout << "Trying to become the leader!\n";
               state = CANDIDATE;
-              //ret = startElection();
+              ret = startElection();
             
               if (ret) {
-                  cout << "Became the leader for term " << curTerm << ", id: " << server_id << "! Democracy works!\n";
+                  cout << server_id << " became the leader for term " << curTerm << endl;
               } else {
                   cout << "Did not become the leader\n";
                   last_comm_time = get_time();
@@ -287,7 +305,7 @@ void ServerRaft::sendHeartbeats(){
       for (int i = 0; i < stubs.size(); i++) {
         // cout<<"sendHearB stub ref:"<<stubs[i]<<endl;
         threads.push_back(std::thread(ServerRaft::AppendEntriesRPC,
-          std::ref(stubs[i]), i, term));
+          std::ref(stubs[i]), i, term, this));
         //cout<<"in thread spawn for heartbeat "<<term<<endl;
       }
       std::cout << "Append Entries sent for term: " << term << ", waiting for responses" << std::endl;
@@ -301,8 +319,96 @@ void ServerRaft::sendHeartbeats(){
       return;
 }
 
+int ServerRaft::startElection() {
+  // Start with one yes vote (we are voting for ourself)
+  auto yes_votes = std::make_shared<std::atomic<uint8_t>>(1);
+  auto no_votes = std::make_shared<std::atomic<uint8_t>>(0);
+  int64_t majority = (num_servers / 2) + 1;
+  int64_t term;
 
-void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t serverIdx, int64_t term){
+  // Increment the term
+  vote_lock.lock();
+  curTerm = curTerm + 1;
+  char* votedServer = new char[22];
+  strcpy(votedServer, server_id.c_str());
+  update_term_and_voted_for(curTerm, votedServer);
+  vote_lock.unlock();
+  std::cout << "Starting term: " << curTerm << "\n";
+
+  term = curTerm;
+  // Spawn threads to request the votes from our peers
+  for (int i = 0; i < stubs.size(); i++) {
+    std::thread t(ServerRaft::RequestVoteRPC,
+      std::ref(stubs[i]), std::ref(yes_votes),
+      std::ref(no_votes), term, other_servers[i]); // 51,53
+    t.detach();
+  }
+
+  // Wait until we have a majority of votes in some direction
+  while (*yes_votes < majority && *no_votes < majority) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  std::cout << "Hello, received vote responses from all servers\n";
+
+  if (*yes_votes >= majority) {
+    state = LEADER;
+    std::cout << "Elected leader" << std::endl;
+    for (int i = 0; i < stubs.size(); i++) {
+      nextIndex[i] = raft_log.size();
+      matchIndex[i] = -1;
+    }
+    return 1;
+  } else {
+    state = FOLLOWER;
+    last_comm_time = get_time();
+    return 0;
+  }
+}
+
+void ServerRaft::RequestVoteRPC(std::unique_ptr<RaftAPI::Stub> &stub,
+        std::shared_ptr<std::atomic<uint8_t>> yes_votes,
+        std::shared_ptr<std::atomic<uint8_t>> no_votes,
+        int64_t term, string callingServerId) //51,53
+    {
+      ClientContext context;
+      RequestVoteRequest request;
+      RequestVoteResponse response;
+      int64_t last_log_index = 0;
+
+      // Fill in the data
+      request.set_term(term);
+      request.set_candidate_id(server_id); //51,53
+
+      // Get the last log index and term
+      log_lock.lock();
+      last_log_index = raft_log.size() - 1;
+      request.set_last_log_idx(last_log_index);
+      if (last_log_index >= 0)
+        request.set_last_log_term(raft_log[last_log_index].term);
+      else
+        request.set_last_log_term(0);
+      log_lock.unlock();
+
+      Status status = stub->RequestVoteRPC(&context, request, &response);
+
+      if (status.ok()) {
+        if (response.voted()) {
+          std::cout << callingServerId << " ---> Yes vote\n";
+          (*yes_votes).fetch_add(1);
+        } else {
+          std::cout << callingServerId << "--->  No vote\n";
+          (*no_votes).fetch_add(1);
+        }
+      } else {
+        std::cout << callingServerId << "---> Communication error\n";
+        // For now, assume network failure stuff is a no vote
+        (*no_votes).fetch_add(1);
+      }
+    }
+
+void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub,
+    int64_t serverIdx, int64_t term, ServerRaft *raftObj){
     AppendEntriesRequest request;
     AppendEntriesResponse response;
     Entry* entry;
@@ -329,25 +435,20 @@ void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t 
         update_index = raft_log.size() - 1;
 
         if (nextIndex[serverIdx] - 1 < 0) {
-          cout<<"Sent follower idx -1\n";
           request.set_follower_log_term(-1);
           request.set_follower_log_idx(-1);
         } else {
           request.set_follower_log_term(raft_log[nextIndex[serverIdx] - 1].term);
           request.set_follower_log_idx(nextIndex[serverIdx] - 1);
-          cout<<"Sent follower idx: "<<nextIndex[serverIdx] - 1<<endl;
         }
 
-        cout<<"Raft Log size: "<<raft_log.size();
         for (int i = nextIndex[serverIdx]; i < raft_log.size(); i++) {
-          cout<<"i: "<<i;
           entry = request.add_entries();
           entry->set_term(raft_log[i].term);
           // string add(raft_log[i].address);
           entry->set_address(raft_log[i].address);
           // string d(raft_log[i].data);
           entry->set_data(raft_log[i].data); // should send the string hopefully
-
         }
         log_lock.unlock();
 
@@ -356,7 +457,12 @@ void ServerRaft::AppendEntriesRPC(std::unique_ptr<RaftAPI::Stub> &stub, int64_t 
         cout << "succcess : " << success <<endl;
         if (!success) {
           std::cout << "Unsuccessful response received from server: " << serverIdx << " for term: " << term << std::endl;
-
+          cout << "\nterm" << term;
+          cout << "\n response.term()" <<  response.term();
+          if  (term < response.term()) {
+            cout << "\nchange to follower" <<endl;
+            raftObj->state = FOLLOWER;
+          }
           // If the write fails when we are trying to write the first index,
           // it is likely that the server is down, so stop trying for now
           if (nextIndex[serverIdx] > 0) {
@@ -390,17 +496,20 @@ void ServerRaft::update_term_and_voted_for(int64_t newTerm, char votedFor[]){
   wf.write((char *) votedFor, IP_SIZE);
   wf.close();
 
+  ServerRaft::curTerm = newTerm;
+  strcpy(voted_for, votedFor);
+
   //Read the updated file
-  // ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
-  // if(!rf.is_open())
-  //   return;
-  // int64_t term;
-  // char vote[IP_SIZE];
-  // rf.read((char *) &term, sizeof(int64_t));
-  // rf.read((char *) vote, IP_SIZE);
-  // rf.close();
-  // string vf(vote);
-  // cout<<"Update: Term in file: "<<term<<"\nVote in file: "<<vf<<endl;
+  ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
+  if(!rf.is_open())
+    return;
+  int64_t term;
+  char vote[IP_SIZE];
+  rf.read((char *) &term, sizeof(int64_t));
+  rf.read((char *) vote, IP_SIZE);
+  rf.close();
+  string vf(vote);
+  cout<<"Update: Term in file: "<<term<<"\nVote in file: "<<vf<<endl;
 }
 
 void ServerRaft::write_entry_to_log(LogEntry lE){
@@ -415,27 +524,26 @@ void ServerRaft::write_entry_to_log(LogEntry lE){
   }
 
 
-  // ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
-  // if(!rf.is_open())
-  //   return;
-  // rf.seekg(0,ios::beg);
-  // int64_t curTerm;
-  // char voted_for[22];
-  // rf.read((char *) &curTerm, sizeof(int64_t));
-  // rf.read((char *) voted_for, sizeof(voted_for));
-  //   string vf(voted_for);
-  //   cout<<"on read Term in file: "<<curTerm<<"\nVote in file: "<<vf<<endl;
-  //   cout<<"Log Entry\n";
-  //   while (!rf.eof())
-  //   {  
-  //       LogEntry l; 
-  //       rf.read((char *) &l, sizeof(LogEntry));
-  //       cout<<"Term: "<<l.term<<" Address: "<<l.address<<" Value: "<<l.data<<endl;
-  //       if (!rf.eof()) 
-  //           break;
-  //   }
-  //   sleep(10);
-  //   rf.close();
+  ifstream rf(raftLogPath.c_str(), ios::out | ios::binary);
+  if(!rf.is_open())
+    return;
+  rf.seekg(0,ios::beg);
+  int64_t curTerm;
+  char voted_for[22];
+  rf.read((char *) &curTerm, sizeof(int64_t));
+  rf.read((char *) voted_for, sizeof(voted_for));
+    string vf(voted_for);
+    cout<<"on read Term in file: "<<curTerm<<"\nVote in file: "<<vf<<endl;
+    cout<<"Log Entry\n";
+    while (!rf.eof())
+    {  
+        LogEntry l; 
+        rf.read((char *) &l, sizeof(LogEntry));
+        cout<<"Term: "<<l.term<<" Address: "<<l.address<<" Value: "<<l.data<<endl;
+        if (!rf.eof()) 
+            break;
+    }
+    rf.close();
 
 
   //Any error check required?? 
@@ -449,57 +557,73 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
   public: 
     //only one obj per registration?
     ServerRaft respRaft;
-//   Status RequestVoteRPC(ServerContext *context, const RequestVoteRequest *request,
-//                 RequestVoteResponse *reply) override {
-//     int64_t requestTerm = request->term();
-//     int64_t candidateId = request->candidate_id();
-//     int64_t requestLastLogIndex = request->last_log_idx();
-//     int64_t requestLastLogTerm = request->last_log_term();
-//     int64_t ourLastLogIndex;
-//     int64_t ourLastLogTerm;
+  Status RequestVoteRPC(ServerContext *context, const RequestVoteRequest *request,
+                RequestVoteResponse *reply) override {
+    int64_t requestTerm = request->term();
+    string candidateId = request->candidate_id();
+    int64_t requestLastLogIndex = request->last_log_idx();
+    int64_t requestLastLogTerm = request->last_log_term();
+    int64_t ourLastLogIndex;
+    int64_t ourLastLogTerm;
 
-//     std::cout << "Received RequestVote from " << candidateId << " for term " << requestTerm << std::endl;
+    ServerRaft respRaft;
+    char* candidateServer = new char[22];
+    strcpy(candidateServer, candidateId.c_str());
 
-//     log_lock.lock();
-//     ourLastLogIndex = raft_log.size() - 1;
-//     if (ourLastLogIndex >= 0)
-//         ourLastLogTerm = raft_log[ourLastLogIndex].term;
-//     else
-//         ourLastLogTerm = 0;
-//     log_lock.unlock();
+    std::cout << "RequestVote from \"" << candidateId << "\" for term " << requestTerm << std::endl;
 
-//     // Use a lock to make sure we don't respond to two simultaneous vote requests
-//     vote_lock.lock();
+    log_lock.lock();
+    ourLastLogIndex = raft_log.size() - 1;
+    if (ourLastLogIndex >= 0)
+        ourLastLogTerm = raft_log[ourLastLogIndex].term;
+    else
+        ourLastLogTerm = 0;
+    log_lock.unlock();
 
-//     if (requestTerm > curTerm) {
-//         state = FOLLOWER;
-//         // TODO: this method is present in server
-//         // update_term_and_voted_for(requestTerm, HAVENT_VOTED);
-//     } else if (requestTerm < curTerm) {
-//         reply->set_term(curTerm);
-//         reply->set_voted(false);
-//         goto out;
-//     }
+    // Use a lock to make sure we don't respond to two simultaneous vote requests
+    vote_lock.lock();
 
-//     reply->set_term(curTerm);
+    if (requestTerm > ServerRaft::curTerm) {
+        respRaft.state = FOLLOWER;
+        // TODO: this method is present in server
+        // ServerRaft::curTerm = requestTerm;
 
-//     if (requestLastLogTerm < ourLastLogTerm) {
-//         reply->set_voted(false);
-//     } else if (requestLastLogTerm == ourLastLogTerm && requestLastLogIndex < ourLastLogIndex) {
-//         reply->set_voted(false);
-//     } else if (voted_for != -1) {
-//         reply->set_voted(false);
-//     } else {
-//         // update_term_and_voted_for(curTerm, candidateId);
-//         reply->set_voted(true);
+        respRaft.update_term_and_voted_for(requestTerm, candidateServer);
+    } else if (requestTerm < ServerRaft::curTerm) {
+        reply->set_term(ServerRaft::curTerm);
+        reply->set_voted(false);
+        goto out;
+    }
 
-//         last_comm_time = gettime();
-//     }
+    reply->set_term(ServerRaft::curTerm);
 
-// out:
-//     vote_lock.unlock();
-//     return Status::OK;
-//   }
+    // cout << "\nrequestLastLogTerm ---> " << requestLastLogTerm;
+    // cout << "\nourLastLogTerm ---> " << ourLastLogTerm;
+    // cout << "\nrequestLastLogIndex ---> " << requestLastLogIndex;
+    // cout << "\nourLastLogIndex ---> " << ourLastLogIndex;
+
+    if (requestLastLogTerm < ourLastLogTerm) {
+        // cout << "\n---1----";
+        reply->set_voted(false);
+    } else if (requestLastLogTerm == ourLastLogTerm && requestLastLogIndex < ourLastLogIndex) {
+        // cout << "\n---2----";
+        reply->set_voted(false);
+    } else if (strlen(respRaft.voted_for) == 0) {
+        // cout << "\n---3----";
+        reply->set_voted(false);
+    } else {
+        cout << "\n---4----" << candidateServer;
+        respRaft.update_term_and_voted_for(ServerRaft::curTerm, candidateServer);
+        reply->set_voted(true);
+
+        ServerRaft::last_comm_time = ServerRaft::get_time();
+    }
+
+out:
+    vote_lock.unlock();
+    delete candidateServer;
+    return Status::OK;
+  }
 
   Status AppendEntriesRPC(ServerContext *context, const AppendEntriesRequest * request,
                 AppendEntriesResponse *reply) override {
@@ -509,34 +633,40 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
       int64_t prevLogIndex = request->follower_log_idx();
       int64_t prevLogTerm = request->follower_log_term();
 
-      ServerRaft respRaft;
+      
 
-      std::cout << "Recieved Append Entries from " <<  leaderId << " for term " << requestTerm <<
+      std::cout << "AppendEntries from \"" <<  leaderId << "\" for term " << requestTerm <<
         ", prevLogIndex: " << prevLogIndex << " and prevLogTerm: " << prevLogTerm << std::endl;
 
       ServerRaft::last_comm_time = respRaft.get_time();
 
-      if (requestTerm > respRaft.curTerm) {
+      if (requestTerm > ServerRaft::curTerm) {
         vote_lock.lock();
-        char notvoted[22]=NOTVOTED;
-        respRaft.update_term_and_voted_for(requestTerm, notvoted);
+        // char notvoted[22]=leaderId.c_str();
+        char* leaderServer = new char[22];
+        strcpy(leaderServer, leaderId.c_str());
+        // ServerRaft::curTerm = requestTerm;
+
+        respRaft.update_term_and_voted_for(requestTerm, leaderServer);
         respRaft.state = FOLLOWER;
         respRaft.current_leader_id = leaderId;
         vote_lock.unlock();
-        cout << "\n1";
+        cout << "\n---1----";
+        delete leaderServer;
       }
-  // check on valid term
-      if(requestTerm < respRaft.curTerm) {
-        reply->set_term(respRaft.curTerm);
+      // check on valid term
+      if(requestTerm < ServerRaft::curTerm) {
+        reply->set_term(ServerRaft::curTerm);
+        cout << "\n---2----";
         reply->set_success(false);
-        cout<<"req term "<<requestTerm<<" less than cur term "<<respRaft.curTerm<< "\n";
+        cout<<"req term "<<requestTerm<<" less than cur term "<<ServerRaft::curTerm<< "\n";
         return Status::OK;
       } else {
 
         // Same term now update logs... 
         respRaft.state = FOLLOWER;
-        cout << "\n2---";
-        reply->set_term(respRaft.curTerm);
+        cout << "\n---3----";
+        reply->set_term(ServerRaft::curTerm);
         reply->set_success(true);
       }
 
@@ -558,23 +688,21 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
         raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
       }
 
-      //what is this logic for??
-      // if(request->entries().size() > 0) {
-      //   int64_t entryTerm = request->entries(0).term();
-      //   if (raft_log[prevLogIndex+1].term != entryTerm) {
-      //     raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
-      //   }
-      // }
+      if(request->entries().size() > 0) {
+        int64_t entryTerm = request->entries(0).term();
+        if (raft_log[prevLogIndex+1].term != entryTerm) {
+          raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
+        }
+      }
 
       struct LogEntry newEntry;
       //run a loop, keep on appending entries from WriteRequest
-      cout<<"\nEntries from request: "<<request->entries().size();
       for (int i = 0; i < request->entries().size(); i++) { 
-        cout << "\n inside for---" ;
+        // cout << "\n inside for---" ;
         newEntry.term = request->entries(i).term(); 
 
-        cout << "\n-----" << request->entries(i).address().c_str();
-        cout << "\n-----" << request->entries(i).data();
+        // cout << "\n-----" << request->entries(i).address().c_str();
+        // cout << "\n-----" << request->entries(i).data();
 
         memcpy(newEntry.address, request->entries(i).address().c_str(), 4096);
         memcpy(newEntry.data, request->entries(i).data().c_str(), 4096);
@@ -588,7 +716,7 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
       cout << "\n followerCommitIdx ---- " << ServerRaft::commit_index;
       if (leaderCommitIdx >  ServerRaft::commit_index) { //comparison should be with commit index
         int64_t new_commit_index = std::min(leaderCommitIdx, (int64_t)(raft_log.size()-1));
-        cout << "\nhere---";
+        // cout << "\nhere---";
         // Apply the log entries to LevelDB --> madhu help
         // apply_entries(raspRaft.commit_index + 1, new_commit_index);
 
