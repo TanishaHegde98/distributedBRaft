@@ -1,6 +1,9 @@
 #include<iostream>
 #include<vector>
 #include<mutex>
+#define DB_SUCCESS 1
+#define NOT_PRIMARY 2
+#define DB_FAIL -2
 
 extern std::vector<struct LogEntry> raft_log;
 extern std::vector<int64_t> nextIndex;
