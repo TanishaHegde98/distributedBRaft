@@ -148,13 +148,13 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
                 // If so, forward the client to the new leader
                 cout << "\n----- inside while-----";
                 // TODO: remove this from here after adding ldr_commit()
-                //ServerRaft::commit_index += 1;
+                // ServerRaft::commit_index += 1;
                 if (raft.state != LEADER) {
                     writer->set_return_code(-1);
                     writer->set_current_leader(raft.current_leader_id);
                     return Status::OK;
                 }
-                ServerRaft::commit_index += 1;
+                // ServerRaft::commit_index += 1;
                 //sleeping because commit_thread should commit the log.. not req in our case
                 //std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
