@@ -48,6 +48,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             if(raft.state == FOLLOWER){
                 writer->set_return_code(NOT_PRIMARY);
                 writer->set_error_code(0);
+                writer->set_current_leader(raft.current_leader_id);
                 return Status::OK;
             }
             leveldb::DB *db;
@@ -97,6 +98,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             if(raft.state == FOLLOWER){
                 writer->set_return_code(NOT_PRIMARY);
                 writer->set_error_code(0);
+                writer->set_current_leader(raft.current_leader_id);
                 return Status::OK;
             }
             leveldb::DB *db;
@@ -137,7 +139,11 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
 
             // Add the new entry to the log
             log_lock.lock();
+            cout<<"Log before-->\n";
+            raft.readonly_raft_log();
             raft.write_entry_to_log(log_entry);
+            cout<<"Log before-->\n";
+            raft.readonly_raft_log();
             raft_log.push_back(log_entry);
             entry_index = raft_log.size() - 1;
             log_lock.unlock();
@@ -148,13 +154,13 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
                 // If so, forward the client to the new leader
                 cout << "\n----- inside while-----";
                 // TODO: remove this from here after adding ldr_commit()
-                // ServerRaft::commit_index += 1;
+                //ServerRaft::commit_index += 1;
                 if (raft.state != LEADER) {
                     writer->set_return_code(-1);
                     writer->set_current_leader(raft.current_leader_id);
                     return Status::OK;
                 }
-                // ServerRaft::commit_index += 1;
+                ServerRaft::commit_index += 1;
                 //sleeping because commit_thread should commit the log.. not req in our case
                 //std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
@@ -190,11 +196,11 @@ int main(int argc, char** argv) {
     //  
     if(argc < 3){
         cout<<"too few arguements\n";
-        cout<<"Usage: ./server <id> <listen_port> <servers_file> [is_primary]/n";
+        cout<<"Usage: ./server <id>:<listen_port> <servers_file> [is_primary]/n";
         exit(0);
     }
 
-    if(argc == 5)
+    if(argc == 4)
         raft.state = LEADER;
     else
         raft.state = FOLLOWER;
@@ -207,11 +213,11 @@ int main(int argc, char** argv) {
 
     //TODO: change server_id type to string and use full_path
     ServerRaft::server_id = stoi(argv[1]);
-    string server_ip(argv[1]);
-    string port(argv[2]);
-    string colon(":");
-    string full_server_path = server_ip+colon+port;
-    string filename = argv[3];
+    // string server_ip(argv[1]);
+    // string port(argv[2]);
+    // string colon(":");
+    string full_server_path = argv[1];
+    string filename = argv[2];
 
     raft.process_server_file(filename);
 
@@ -230,9 +236,10 @@ int main(int argc, char** argv) {
     
     //RunServer(full_server_path,ServerRaft::other_servers);
     std::thread server_thread(RunServer, full_server_path, ServerRaft::other_servers);
-
+    //std::thread ldr_commit_thread(ServerRaft::commit_thread, &raft );
     //server_thread.join();
     raft.handleHeartbeats();
+
     //TODO:
     // sr.read_raft_log()
     // sr.handle_heartbeats();
