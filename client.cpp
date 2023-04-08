@@ -3,6 +3,7 @@ using namespace std;
 
 Client::Client(std::shared_ptr<Channel> channel) : stub_(DistributeddBRaft::NewStub(channel)){}
 int leader;
+string leaderAddress = "";
 int Client::Get(const std::string& key) {
     cout << "Arrived in Get" << endl;
     ReadReq request;
@@ -19,6 +20,7 @@ int Client::Get(const std::string& key) {
         return reply.return_code();
       } else if(reply.return_code() == NOT_PRIMARY){ 
         std::cout << "Reached a Follower" << endl; 
+        leaderAddress = reply.current_leader();
         return reply.return_code();
       } 
       std::cout << "Response data: " << reply.value() << endl;
@@ -40,6 +42,7 @@ int Client::Put(const std::string& key, const std::string& val) {
         return reply.return_code();
       } else if(reply.return_code() == NOT_PRIMARY){ 
         std::cout << "Reached a Follower" << endl; 
+        leaderAddress = reply.current_leader();
         return reply.return_code();
       } 
       std::cout << "Response data: " << reply.value() << endl;
@@ -79,11 +82,19 @@ int Client::Put(const std::string& key, const std::string& val) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
         first_try = false;
-        cout << "Trying for server: " << dbServers[leader] << endl;
-        string dbAddress = dbServers[leader];
-        //Client *c = dbServerArr[leader];
         
-        Client *c = new Client(grpc::CreateChannel(dbAddress, grpc::InsecureChannelCredentials()));
+        cout << "leaderAddress : " << leaderAddress << endl;
+        string serverAddress;
+        if (leaderAddress != "") {
+          cout << "inside" << endl;
+          serverAddress = leaderAddress;
+        } else {
+          serverAddress =  dbServers[leader];
+        }
+        //Client *c = dbServerArr[leader];
+        cout << "Trying for server: " << serverAddress << endl;
+        
+        Client *c = new Client(grpc::CreateChannel(serverAddress, grpc::InsecureChannelCredentials()));
         if(val.empty()){
           result = c->Get(key);
           cout << "Result after Get:" << result << endl;
@@ -92,8 +103,9 @@ int Client::Put(const std::string& key, const std::string& val) {
         }
 
         // If we couldn't communicate with the given server, increment the primary
-        if (result == NOT_PRIMARY) {
+        if (result == NOT_PRIMARY || result == -1) {
             leader = (leader + 1) % dbServers.size();
+            cout<<"Leader increment: "<<leader;
         }
         std::cout << "Leader:" << leader << ": " << ", Result: " << result << std::endl;
         std::cout << "Time:" << get_time() - request_start_time << endl;
@@ -112,15 +124,17 @@ int main(int argc, char** argv) {
     std::vector<std::string> dbServers;
     process_server_file(dbServers, filename);
     leader = 0;
-    string key = "name";
-    string val;
-    
-    leader = do_op(dbServers, key, val);
+    string key = "tani";
+    string val = "hegde";
+    leader = do_op(dbServers,key,val);
+    //leader = do_op(dbServers, key, val);
     cout << "Leader in main" << leader << endl;
     cout << "Back into main" << endl;
-    val = "val1";
-    cout << "Trying for put" << endl;
+    key = "madhu";
+    val = "nij";
+    //cout << "Trying for put" << endl;
     leader = do_op(dbServers, key, val);
+    //leader = do_op(dbServers,key);
 
   return 0;
 }
