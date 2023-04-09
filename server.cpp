@@ -38,17 +38,53 @@ using grpc::Status;
 
 #define NOTVOTED ""
 
+string db_path = "/tmp/testdb";
 ServerRaft raft;
+
+bool db_put(string key, string value, int &errorCode, int &returnCode){
+
+    leveldb::DB *db;
+    leveldb::Options options;
+    options.create_if_missing = true;
+    // cout<<"Db path: "<<db_path<<endl;
+    int key_found = 0;
+    leveldb::Status dbStatus = leveldb::DB::Open(options, db_path, &db);
+    assert(dbStatus.ok());
+    if (!dbStatus.ok()) {
+        std::cout << "DB Read Error" << endl;
+        returnCode=DB_FAIL;
+        errorCode=-1;
+        delete db;
+        return dbStatus.ok();
+    }
+
+    dbStatus = db->Put(leveldb::WriteOptions(), key, value);
+    assert(dbStatus.ok());
+    if (!dbStatus.ok()) {
+        std::cout << "Write Error" << endl;
+        returnCode=DB_FAIL;
+        errorCode=-1;
+    } else {
+        // cout<<"db put success\n";
+        errorCode=0;
+        returnCode=DB_SUCCESS;
+    }
+    delete db;
+
+    return dbStatus.ok();
+}
 
 class distributeddBRaftImpl final : public DistributeddBRaft::Service {
     public:
         Status Get(ServerContext* context, const ReadReq* request, Response* writer)  {
-            cout << "In Get Client" << endl;
-            cout << "RAFT STATE IN CLIENT:" << raft.state << endl;
+            cout << "------------------------------------------------" << endl;
+            cout << "Received Get request from client: get(" << request->key() << ")"<< endl;
             if(raft.state == FOLLOWER){
                 writer->set_return_code(NOT_PRIMARY);
                 writer->set_error_code(0);
                 writer->set_current_leader(raft.current_leader_id);
+                cout << "Redirecting to the leader" << endl;
+                cout << "------------------------------------------------" << endl;
                 return Status::OK;
             }
             leveldb::DB *db;
@@ -56,7 +92,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             options.create_if_missing = true;
             int key_found = 0;
             // open
-            std::cout << "Request key: " << request->key() << endl;
+            // std::cout << "Request key: " << request->key() << endl;
             std::string val;
             leveldb::Status dbStatus = leveldb::DB::Open(options, "/tmp/testdb", &db);
         
@@ -87,50 +123,66 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             writer->set_value(val);
             writer->set_error_code(0);
             writer->set_return_code(DB_SUCCESS);
+            cout << "------------------------------------------------" << endl;
             return Status::OK;
         }
 
         Status Put(ServerContext* context, const WriteReq* request,Response* writer) override {
             
             int entry_index;
-
-            cout << "In Put Client" << endl;
+            cout << "------------------------------------------------" << endl;
+            cout << "Received Put request from client: put(" << request->key() 
+                                <<  ", " << request->value() << ")" << endl;
             if(raft.state == FOLLOWER){
                 writer->set_return_code(NOT_PRIMARY);
                 writer->set_error_code(0);
                 writer->set_current_leader(raft.current_leader_id);
+                cout << "Redirecting to the leader" << endl;
+                cout << "------------------------------------------------" << endl;
                 return Status::OK;
             }
-            leveldb::DB *db;
-            leveldb::Options options;
-            options.create_if_missing = true;
-            // open
-            int key_found = 0;
-            std::string val;
+            // leveldb::DB *db;
+            // leveldb::Options options;
+            // options.create_if_missing = true;
+            // // open
+            // int key_found = 0;
+            // std::string val;
 
-            leveldb::Status dbStatus = leveldb::DB::Open(options, "/tmp/testdb", &db);
-            assert(dbStatus.ok());
-            // cout<< "\ndb:" << &db;
-            if (!dbStatus.ok()) {
-                std::cout << "DB Read Error" << endl;
-                writer->set_return_code(DB_FAIL);
-                writer->set_error_code(-1);
-            }
-            std::string value = request->value();
-            std::cout << "Request key: " << request->key() << endl;
-            std::cout << "Value: " << value << endl;
+            // leveldb::Status dbStatus = leveldb::DB::Open(options, "/tmp/testdb", &db);
+            // assert(dbStatus.ok());
+            // // cout<< "\ndb:" << &db;
+            // if (!dbStatus.ok()) {
+            //     std::cout << "DB Read Error" << endl;
+            //     writer->set_return_code(DB_FAIL);
+            //     writer->set_error_code(-1);
+            // }
+            // std::string value = request->value();
 
-            dbStatus = db->Put(leveldb::WriteOptions(), request->key(), value);
-            if (!dbStatus.ok()) {
-                std::cout << "Write Error" << endl;
-                writer->set_return_code(DB_FAIL);
-                writer->set_error_code(-1);
-            } else {
-                writer->set_error_code(0);
-                writer->set_value(value);
-                writer->set_return_code(DB_SUCCESS);
+            // dbStatus = db->Put(leveldb::WriteOptions(), request->key(), value);
+            // if (!dbStatus.ok()) {
+            //     std::cout << "Write Error" << endl;
+            //     writer->set_return_code(DB_FAIL);
+            //     writer->set_error_code(-1);
+            // } else {
+            //     writer->set_error_code(0);
+            //     writer->set_value(value);
+            //     writer->set_return_code(DB_SUCCESS);
+            // }
+            // delete db;
+
+            int errorCode=0, returnCode=0;
+            bool dbStatus = db_put(request->key(), request->value(),errorCode,returnCode);
+            if(!dbStatus){
+                writer->set_return_code(returnCode);
+                writer->set_error_code(errorCode);
+                return Status::OK;
             }
-            delete db;
+            else{
+                writer->set_return_code(returnCode);
+                writer->set_error_code(errorCode);
+                writer->set_value(request->value());
+            }
+                
 
             LogEntry log_entry;
             log_entry.term = raft.curTerm;
@@ -139,10 +191,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
 
             // Add the new entry to the log
             log_lock.lock();
-            cout<<"Log before-->\n";
-            raft.readonly_raft_log();
             raft.write_entry_to_log(log_entry);
-            cout<<"Log before-->\n";
             raft.readonly_raft_log();
             raft_log.push_back(log_entry);
             entry_index = raft_log.size() - 1;
@@ -152,20 +201,17 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             while (ServerRaft::commit_index < entry_index) {
                 // Have we somehow been demoted from leader?
                 // If so, forward the client to the new leader
-                cout << "\n----- inside while-----";
-                // TODO: remove this from here after adding ldr_commit()
-                //ServerRaft::commit_index += 1;
                 if (raft.state != LEADER) {
                     writer->set_return_code(-1);
                     writer->set_current_leader(raft.current_leader_id);
+                    cout << "Redirecting to the leader" << endl;
+                    cout << "------------------------------------------------" << endl;
                     return Status::OK;
                 }
                 ServerRaft::commit_index += 1;
-                //sleeping because commit_thread should commit the log.. not req in our case
-                //std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            cout << "\n---out of put ----\n";
-            
+                // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            } 
+            cout << "------------------------------------------------" << endl;           
             return Status::OK;
         }
 };
@@ -183,7 +229,7 @@ void RunServer(string listen_port, vector<string>other_servers) {
     builder.RegisterService(&raftService);
     // Finally assemble the server.
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server listening on " << server_address << std::endl;
+    std::cout << "\nListening on " << server_address << std::endl;
 
     // Wait for the server to shutdown. Note that some other thread must be
     // responsible for shutting down the server for this call to ever return.
@@ -210,12 +256,7 @@ int main(int argc, char** argv) {
     // crate separate log files for each server
     // mylogserverid.log
     
-
-    //TODO: change server_id type to string and use full_path
     ServerRaft::server_id = stoi(argv[1]);
-    // string server_ip(argv[1]);
-    // string port(argv[2]);
-    // string colon(":");
     string full_server_path = argv[1];
     string filename = argv[2];
 
@@ -224,25 +265,19 @@ int main(int argc, char** argv) {
     //will create raftLogPath too
     raft.set_serverId(full_server_path);
 
+    //TODO: is this needed ?
     raft.read_raft_log();
-    // char notvoted[IP_SIZE] = "127.0.0.1:50051";
-    // cout<<"server size: "<<sizeof(notvoted);
-    // raft.update_term_and_voted_for(2,notvoted);
 
     raft.last_comm_time = raft.get_time() + 20000;
-    for(auto o:ServerRaft::other_servers){
-        cout<<o<<endl;
-    }
     
-    //RunServer(full_server_path,ServerRaft::other_servers);
+    db_path+=ServerRaft::server_id;
+
     std::thread server_thread(RunServer, full_server_path, ServerRaft::other_servers);
-    //std::thread ldr_commit_thread(ServerRaft::commit_thread, &raft );
-    //server_thread.join();
+    cout << "Other servers: ";
+    for(auto o:ServerRaft::other_servers){
+        cout << o << "  ";
+    }
     raft.handleHeartbeats();
 
-    //TODO:
-    // sr.read_raft_log()
-    // sr.handle_heartbeats();
-    // std::thread ldr_commit_thread(sr.commit_thread);
     return 0;
 }
