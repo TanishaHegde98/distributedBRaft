@@ -78,7 +78,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
     public:
         Status Get(ServerContext* context, const ReadReq* request, Response* writer)  {
             cout << "------------------------------------------------" << endl;
-            cout << "Received Get request from client: get(" << request->key() << ")"<< endl;
+            // cout << "Received Get request from client: get(" << request->key() << ")"<< endl;
             if(raft.state == FOLLOWER){
                 writer->set_return_code(NOT_PRIMARY);
                 writer->set_error_code(0);
@@ -94,7 +94,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             // open
             // std::cout << "Request key: " << request->key() << endl;
             std::string val;
-            leveldb::Status dbStatus = leveldb::DB::Open(options, "/tmp/testdb", &db);
+            leveldb::Status dbStatus = leveldb::DB::Open(options, db_path, &db);
         
             if (!dbStatus.ok()) {
                 std::cout << "DB Read Error" << endl;
@@ -182,7 +182,8 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
                 writer->set_error_code(errorCode);
                 writer->set_value(request->value());
             }
-                
+            
+            // cout << "before log write" << raft.get_time() << endl;
 
             LogEntry log_entry;
             log_entry.term = raft.curTerm;
@@ -196,6 +197,7 @@ class distributeddBRaftImpl final : public DistributeddBRaft::Service {
             raft_log.push_back(log_entry);
             entry_index = raft_log.size() - 1;
             log_lock.unlock();
+            // cout << "after log write" << raft.get_time() << endl;
 
             // Wait for the update to be commited before returning to the client
             while (ServerRaft::commit_index < entry_index) {

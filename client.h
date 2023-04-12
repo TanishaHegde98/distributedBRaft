@@ -34,7 +34,7 @@ public:
     Client(std::shared_ptr<Channel> channel);
     int Get(const std::string&);
     int Put(const std::string&, const std::string& val);
-    //uint64_t Client::get_time();
+    // static uint64_t get_time();
 
 private:
     std::unique_ptr< DistributeddBRaft::Stub> stub_;

@@ -27,7 +27,7 @@
 
 #include "globals.h"
 
-#define IP_SIZE 16
+#define IP_SIZE 22
 #define NOTVOTED ""
 #define LOG_OFFSET (sizeof(int64_t)+IP_SIZE)
 #define ENTRY_SIZE sizeof(LogEntry)
@@ -208,7 +208,7 @@ void ServerRaft::readonly_raft_log(){
     }
     rf.close();
     count--;
-    // cout<< "Read "<< count << " entries from the persistent log!\n";
+    cout<< "Read "<< count << " entries from the persistent log!\n";
 }
 
 void ServerRaft:: read_raft_log(){
@@ -251,7 +251,7 @@ void ServerRaft:: read_raft_log(){
     }
     raft_log.pop_back();
     rf.close();
-    // cout<< "Read "<< raft_log.size() << " entries from the persistent log!\n";
+    cout<< "Read "<< raft_log.size() << " entries from the persistent log!\n";
 }
 
 uint64_t ServerRaft::get_time(){
@@ -305,13 +305,15 @@ void ServerRaft::handleHeartbeats(){
         matchIndex.push_back(-1);
         nextIndex.push_back(-1);
       }
-    while(true){
+      while(true){
         bool ret = false;
         if(state == LEADER){
             //since we are the leader, our log file is source of truth. 
             // Is it required to apply entries to state machine??
             commit_index = raft_log.size() - 1;
+            // cout << "Time before append rpc start" << get_time() << endl;
             sendHeartbeats();
+            // cout << "Time after append rpc results" << get_time() << endl;
             this_thread::sleep_for(std::chrono::milliseconds(1000));
         }else{
             // sleep(1000);
@@ -320,6 +322,7 @@ void ServerRaft::handleHeartbeats(){
             int64_t diff = (cur_time - last_time);
 
             if (cur_time > last_time && cur_time - last_time >= TOTAL_TIMEOUT){
+              // cout << "Time before election start" << get_time() << endl;
               cout << "------------------------------------------------" << endl;
               std::cout << "Starting election. Trying to become the leader...\n";
               state = CANDIDATE;
@@ -331,7 +334,8 @@ void ServerRaft::handleHeartbeats(){
                   cout << "Did not become the leader\n";
                   last_comm_time = get_time();
               }
-               cout << "------------------------------------------------" << endl;
+              // cout << "Time after election results" << get_time() << endl;
+              cout << "------------------------------------------------" << endl;
             }
         }
     }
@@ -368,7 +372,7 @@ int ServerRaft::startElection() {
   // Increment the term
   vote_lock.lock();
   curTerm = curTerm + 1;
-  char* votedServer = new char[16];
+  char* votedServer = new char[IP_SIZE];
   memcpy(votedServer, server_id.c_str(), IP_SIZE);
   update_term_and_voted_for(curTerm, votedServer);
   vote_lock.unlock();
@@ -391,7 +395,7 @@ int ServerRaft::startElection() {
 
   if (*yes_votes >= majority) {
     state = LEADER;
-    // std::cout << "Elected leader" << std::endl;
+    std::cout << "Elected leader" << std::endl;
     for (int i = 0; i < stubs.size(); i++) {
       nextIndex[i] = raft_log.size();
       matchIndex[i] = -1;
@@ -529,7 +533,7 @@ class RaftInterfaceImpl final : public RaftAPI::Service {
     int64_t ourLastLogTerm;
 
     // ServerRaft respRaft;
-    char* candidateServer = new char[16];
+    char* candidateServer = new char[IP_SIZE];
     memcpy(candidateServer, candidateId.c_str(), IP_SIZE);
      cout << "------------------------------------------------" << endl;
     std::cout << "RequestVote from \"" << candidateId << "\" for term " << requestTerm << std::endl;
@@ -603,7 +607,7 @@ out:
 
       if (requestTerm > ServerRaft::curTerm) {
         vote_lock.lock();
-        char* leaderServer = new char[16];
+        char* leaderServer = new char[IP_SIZE];
         memcpy(leaderServer, leaderId.c_str(), IP_SIZE);
 
         respRaft.update_term_and_voted_for(requestTerm, leaderServer);
@@ -634,7 +638,7 @@ out:
 
       // deleting entries after index with same term
       if(prevLogIndex+1 < raft_log.size()) {
-        cout << "prevLogIndex: " << prevLogIndex << " raft_log.size(): " << raft_log.size();
+        // cout << "prevLogIndex: " << prevLogIndex << " raft_log.size(): " << raft_log.size();
         truncate(respRaft.raftLogPath.c_str(), LOG_OFFSET + ((prevLogIndex + 1) * ENTRY_SIZE));
         raft_log.erase(raft_log.begin()+prevLogIndex+1, raft_log.end());
       }
@@ -648,6 +652,7 @@ out:
 
       struct LogEntry newEntry;
       //run a loop, keep on appending entries from WriteRequest
+      // cout << "before log + db write" << respRaft.get_time() << endl;
       for (int i = 0; i < request->entries().size(); i++) { 
         newEntry.term = request->entries(i).term(); 
         memcpy(newEntry.address, request->entries(i).address().c_str(), 4096);
@@ -655,6 +660,7 @@ out:
         respRaft.write_entry_to_log(newEntry);
         raft_log.push_back(newEntry);
       }
+      // cout << "after log write" << respRaft.get_time() << endl;
       log_lock.unlock();
 
       int64_t leaderCommitIdx = request->leader_commit();
@@ -674,6 +680,7 @@ out:
             int err,ret;
             db_put(key,val,err,ret);
           }
+          cout << "after log + db write" << respRaft.get_time() << endl;
 
         ServerRaft::commit_index = new_commit_index;
       }
